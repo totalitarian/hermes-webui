@@ -20076,7 +20076,22 @@ def _handle_tts(handler, parsed):
         voice = data.get("voice") or voice
         rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
         pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
-        engine = (data.get("engine") or "edge").strip().lower()
+        request_engine = data.get("engine")
+        if "engine" not in data or (
+            isinstance(request_engine, str) and not request_engine.strip()
+        ):
+            persisted_engine = (load_settings() or {}).get("tts_engine")
+            if isinstance(persisted_engine, str):
+                persisted_engine = persisted_engine.strip().lower()
+            else:
+                persisted_engine = ""
+            engine = (
+                persisted_engine
+                if persisted_engine in {"edge", "elevenlabs", "openai"}
+                else "edge"
+            )
+        else:
+            engine = (request_engine or "edge").strip().lower()
     except Exception:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid request body", 400)
@@ -24996,7 +25011,17 @@ def _handle_cron_update(handler, body):
                 updates[k] = v
     except ValueError as e:
         return bad(handler, str(e))
-    job = update_job(body["job_id"], updates)
+    # #7352: ``update_job`` re-parses the updated schedule through
+    # ``cron.jobs.parse_schedule``, which raises ``ValueError`` for
+    # display-form input like ``"once at 2026-08-28 16:05"`` (or any other
+    # user-typed garbage). That exception previously escaped to a 500
+    # because the earlier normalization try block didn't cover it. Return
+    # 400 with the parser message so the WebUI can surface a real
+    # validation error instead of an opaque Internal Server Error.
+    try:
+        job = update_job(body["job_id"], updates)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
     if not job:
         return bad(handler, "Job not found", 404)
     return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
